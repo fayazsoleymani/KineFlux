@@ -3,7 +3,7 @@ import csv
 import numpy as np
 from statistics import mean, median
 from scipy.stats import variation
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupKFold
 from sklearn.linear_model import  Ridge
 from sklearn.linear_model import  LinearRegression
 from sklearn.metrics import r2_score
@@ -32,6 +32,8 @@ with open('../data/heckmann/rxn2substrates.tsv') as file:
 print("Lenght rxn2substrates:\t", len(rxn2substrates))
 
 rxn2dataset= dict()
+con2gp= dict()
+gp_num= 0
 with open('../data/heckmann/final_dataset_heckmann_kappmax_calculated_pFBA.csv', 'r') as file:
 # with open('../data/heckmann/final_dataset_heckmann_kcat_pFBA.csv', 'r') as file:  
     reader= csv.reader(file, delimiter= ',')
@@ -43,42 +45,60 @@ with open('../data/heckmann/final_dataset_heckmann_kappmax_calculated_pFBA.csv',
         eta= float(row[-1])
         if eta >= 0.99 or eta <= 0.01:
             continue
-        if rxn in rxn2dataset:
-            rxn2dataset[rxn].append((con, fluxsums, eta))
+
+
+        con_only= con.split('_')[0]
+        if con_only not in con2gp:
+            gp= gp_num
+            con2gp[con_only]= gp_num
+            gp_num += 1
         else:
-            rxn2dataset[rxn]= [(con, fluxsums, eta)]
+            gp= con2gp[con_only]
+  
+        if rxn in rxn2dataset:
+            rxn2dataset[rxn].append((con, fluxsums, eta, gp))
+        else:
+            rxn2dataset[rxn]= [(con, fluxsums, eta, gp)]
+
+
+            
 print("Length metabolite:\t", len(mets))
 print("length rxn2dataset:\t", len(rxn2dataset))
 
 rxn2cons = dict()
 rxn2fluxsums = dict()
 rxn2etas = dict()
+rxn2gps= dict()
 for rxn, data in rxn2dataset.items():
 
     temp_cons = []
     temp_fluxsums = []
     temp_etas = []
+    temp_gps= []
 
-    for con_fluxsum_eta in data:
-        con, fluxsum, eta = con_fluxsum_eta[0], con_fluxsum_eta[1], con_fluxsum_eta[2]
+    for con_fluxsum_eta_gp in data:
+        con, fluxsum, eta, gp = con_fluxsum_eta_gp[0], con_fluxsum_eta_gp[1], con_fluxsum_eta_gp[2], con_fluxsum_eta_gp[3]
         temp_cons.append(con)
         temp_fluxsums.append(fluxsum)
         temp_etas.append(eta)
+        temp_gps.append(gp)
 
     rxn2cons[rxn] = temp_cons
     rxn2fluxsums[rxn] = np.array(temp_fluxsums)
     rxn2etas[rxn] = np.array(temp_etas)
+    rxn2gps[rxn]= np.array(temp_gps)
 
     
-def regression_model(X, y):
+def regression_model(X, y, gps):
 
     model = LinearRegression()
-    k_folds = 5
-    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    k_folds = 4
+    gkf= GroupKFold(n_splits= k_folds, shuffle= True, random_state= 42)
 
     r2_folds = []
 
-    for train_index, test_index in kf.split(X):
+    for train_index, test_index in gkf.split(X, y, gps):
+        
         X_train, X_test = X[train_index], X[test_index]
         y_train, y_test = y[train_index], y[test_index]
 
@@ -95,8 +115,8 @@ def regression_model(X, y):
 
         r2_fold = r2_score(y_test, y_pred)
         r2_folds.append(r2_fold)
-
-    avg_r2 = np.mean(r2_folds)
+        
+    avg_r2 = np.mean(r2_folds).item()
 
     return avg_r2
 
@@ -131,17 +151,16 @@ rxns_ten = [rxn for rxn in rxn2dataset.keys() if len(rxn2dataset[rxn]) >= 10]
 n_jobs= os.cpu_count()-4
 print("Number of filtered rxns:\t", len(rxns_ten))
 
-with open("../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA.csv", 'w') as file:
+with open("../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA_con_split.csv", 'w') as file:
     writer= csv.writer(file, delimiter=',')
     writer.writerow(['rxn', 'Nsubs', 'OnlySubResults', 'nOtherMets', \
                      'nOneComb', 'OneMetResults', 'nTwoComb', 'TwoMetResults', 'nThreeComb', 'ThreeMetResults'])
 
-
 def additional_mets_model(met):
     metabolites = substrates + list(met)
     indices = [mets.index(met) for met in metabolites]
-    X, y = rxn2fluxsums[rxn][:, indices], rxn2etas[rxn]
-    r2_rxn = regression_model(X, y)
+    X, y, gps = rxn2fluxsums[rxn][:, indices], rxn2etas[rxn], rxn2gps[rxn]
+    r2_rxn = regression_model(X, y, gps)
     return (met, r2_rxn)
 
 all_results= dict()
@@ -153,10 +172,10 @@ for index, rxn in enumerate(rxns_ten):
     substrates= rxn2substrates[rxn]
     temp= [len(substrates)]
     indices = [mets.index(met) for met in substrates]
-    X, y = rxn2fluxsums[rxn][:, indices], rxn2etas[rxn]
+    X, y, gps = rxn2fluxsums[rxn][:, indices], rxn2etas[rxn], rxn2gps[rxn]
     
     print("index:  ", index, "\tRXN:  ", rxn, "\tNumber of Substrates:  ", len(substrates))
-    r2_rxn = regression_model(X, y)
+    r2_rxn = regression_model(X, y, gps)
     r2_substrates_all.append(r2_rxn)
     temp.append(r2_rxn)
     print(f'Only substrates R-squared: {r2_rxn}')
@@ -218,7 +237,7 @@ for index, rxn in enumerate(rxns_ten):
     print("Time:\t:", end_time-start_time)
     print("-" * 50)
 
-    with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA_kcat.csv', 'a') as file:
+    with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA_con_split.csv', 'a') as file:
         writer= csv.writer(file, delimiter=',')
         row= [rxn]
         row.extend(temp)
