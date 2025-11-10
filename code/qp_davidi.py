@@ -20,6 +20,21 @@ print("Davidi Abundance:  {}, \tMean:  {}".format(len(rxn_con2abundance_davidi),
                                                mean(rxn_con2abundance_davidi.values())))
 
 
+rxn_con2abundance_heckmann= dict()
+import csv
+from statistics import mean, median
+with open('../data/heckmann/heckman_protein_ab_S1A_excel_sup.tsv', 'r') as file:
+    reader= csv.reader(file, delimiter= '\t')
+    header= next(reader, None)
+    for row in reader:
+        rxn, strain, bio_rep, abundance= row[0], row[2], row[5], float(row[6]) * 10e-12
+        con= strain+ '_' + bio_rep
+        rxn_con2abundance_heckmann[(rxn, con)]= abundance
+            
+print("Heckmann Abundance:  {}, \tMean:  {}".format(len(rxn_con2abundance_heckmann),
+                                                   mean(rxn_con2abundance_heckmann.values())))
+
+
 rxn2kappmax= dict()
 with open('../data/heckmann/heckmann_rxn2kappmax_pFBA.csv', 'r') as file:
     reader= csv.reader(file, delimiter= ',')
@@ -79,13 +94,15 @@ for rxn, data in rxn2dataset.items():
     rxn2etas[rxn]= np.array(temp_etas)
     rxn2samples[rxn]= len(temp_etas)
     
-threshold= 0.6
+threshold= 0.5
 results= dict()
 rxn2best_adj_r2= dict()
-with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA.csv', 'r') as file:
+with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA_con_split.csv', 'r') as file:
     reader= csv.reader(file, delimiter= ',')
     header= next(reader, None)
     for row in reader:
+        if row[2] == 'nan':
+            continue
         only_subs=eval(row[2]) 
         if float(only_subs) > -1000:
             n_samples= rxn2samples[row[0]]
@@ -112,12 +129,6 @@ with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA.csv
                     results[row[0]]= two_data
                 elif temp_index == 3:
                     results[row[0]]= three_data
-                    
-with open('../data/heckmann/heckmann_ml_results_trimed_0.6.csv', 'w') as file:
-    writer= csv.writer(file, delimiter= ',')
-    writer.writerow(['rxn', 'mets', 'r2', 'best_adj_r2'])
-    for key, value in results.items():
-        writer.writerow([key, value[0], value[1], rxn2best_adj_r2[key]])
 
 print(f"Number of all rxns with r^2 upper than threshold {threshold}:\t{len(results)}")
 
@@ -192,7 +203,6 @@ from gurobipy import GRB
 import matplotlib.pyplot as plt
 
 con2corr= dict()
-
 for target_con in cons:
     
     print(f"Condition:\t{target_con}")
@@ -222,7 +232,6 @@ for target_con in cons:
     m.params.FeasibilityTol= 1e-6     # min: 1e-9, max: 1e-2, default: 1e-6
     m.params.OptimalityTol= 1e-6      # min: 1e-9, max: 1e-2, default: 1e-6
     m.params.Presolve= 2              # default: -1, max= 2
-    
     
     S_p= np.maximum(S, 0)
 
@@ -259,6 +268,14 @@ for target_con in cons:
         m.addConstr(v_pred == rxn_con2abundance_davidi[(rxn, target_con)] * rxn2kappmax[rxn] * eta)
         v_pred_all[rxn]= v_pred
 
+    for rxn in rxns:
+        if (rxn, target_con) in rxn_con2abundance_heckmann and rxn in rxn2kappmax:
+            temp_E= rxn_con2abundance_heckmann[(rxn, target_con)]
+            temp_kapp= rxn2kappmax[rxn]
+            new_ub= temp_E * temp_kapp
+            if new_ub > 0:
+                v[rxns.index(rxn)].ub = new_ub
+
 
     obj_expr= gp.quicksum((v[rxn_indices[rxn]]- v_pred_all[rxn]) * (v[rxn_indices[rxn]]- v_pred_all[rxn])\
                           for rxn in target_rxns_E_available)
@@ -270,7 +287,7 @@ for target_con in cons:
     
     
     # checking one solution
-    if (m.status== GRB.OPTIMAL or m.status == GRB.TIME_LIMIT) and m.solCount > 0:
+    if m.sol_count > 0:
     
         v_measured= np.array(con2fluxes_davidi[target_con])
         
@@ -278,41 +295,15 @@ for target_con in cons:
         con2corr[target_con]= correlation
         print("Correlation:\t", correlation)
         
-        count_zero_v_pred= 0
-        zero_v_pred_indices= []
-        count_zero_v_measure= 0
         fluxes= []
         for i, (v_m, v_p) in enumerate(zip(v_measured, v.x)):
-            if v_p == 0 and v_m > 0:
-                count_zero_v_pred += 1
-                if v_m>0.01:
-                    zero_v_pred_indices.append(i)
-            if v_m == 0 and v_p > 0:
-                count_zero_v_measure += 1
             fluxes.append([i, v_m, v_p])
-        print("#zero v_pred & positive v_measure:  ", count_zero_v_pred)
-        print("#zero v_measure & positive v_pred:  ", count_zero_v_measure)
 
-        with open(f'../data/davidi/qp_results/fluxes_{target_con}.csv', 'w') as file:
+        with open(f'../data/davidi/qp_results_kappmax_heckmann/fluxes_{target_con}.csv', 'w') as file:
             writer= csv.writer(file, delimiter= ',')
             writer.writerow(['index', 'v_measured', 'v_pred'])
             for row in fluxes:
                 writer.writerow(row)
 
-        plt.figure(figsize=(5, 5))
-        plt.plot(np.log(v_measured + 1e-5), np.log(v.x+ 1e-5), 'o', markersize=1, color= 'blue')
-        plt.xlabel('v_measured')
-        plt.ylabel('v_pred')
-        plt.savefig(f'../data/davidi/qp_results/fluxes_{target_con}.png', dpi=300, bbox_inches='tight')
-        plt.show()
+    print("_" * 100)
 
-        print("_" * 100)
-    else:
-        print(m.status)
-#     break
-
-with open('../data/davidi/qp_results/correlations.csv', 'w') as file:
-    writer= csv.writer(file, delimiter= ',')
-    writer.writerow(['condition', 'corrcoef'])
-    for key, value in con2corr.items():
-        writer.writerow([key, value])

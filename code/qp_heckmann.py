@@ -78,13 +78,15 @@ for rxn, data in rxn2dataset.items():
     rxn2etas[rxn]= np.array(temp_etas)
     rxn2samples[rxn]= len(temp_etas)
     
-threshold= 0.6
+threshold= 0.5
 results= dict()
 rxn2best_adj_r2= dict()
-with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA.csv', 'r') as file:
+with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA_con_split.csv', 'r') as file:
     reader= csv.reader(file, delimiter= ',')
     header= next(reader, None)
     for row in reader:
+        if row[2] == 'nan':
+            continue
         only_subs=eval(row[2]) 
         if float(only_subs) > -1000:
             n_samples= rxn2samples[row[0]]
@@ -112,7 +114,7 @@ with open('../data/heckmann/heckmann_ml_results_linear_regression_logit_pFBA.csv
                 elif temp_index == 3:
                     results[row[0]]= three_data
                     
-with open('../data/heckmann/heckmann_ml_results_trimed_0.6.csv', 'w') as file:
+with open('../data/heckmann/heckmann_ml_results_trimed_0.5.csv', 'w') as file:
     writer= csv.writer(file, delimiter= ',')
     writer.writerow(['rxn', 'mets', 'r2', 'best_adj_r2'])
     for key, value in results.items():
@@ -143,6 +145,7 @@ rxn_indices= dict()
 model= loadmat(f'../data/GEMs/iJO1366_irrev.mat')['iJO1366']
 mets= [element[0][0] for element in model['mets'][0][0]]
 rxns= [element[0][0] for element in model['rxns'][0][0]]
+# rxn2indices_all= {rxn:index for rxn, index in enumerate(rxns)}
 
 
 for rxn in target_rxns:
@@ -211,7 +214,6 @@ import matplotlib.pyplot as plt
 con2corr= dict()
 
 for target_con in con2rxns.keys():
-# target_con= 'pgi1_B1'
     
     print(f"Condition:\t{target_con}")
 
@@ -240,8 +242,6 @@ for target_con in con2rxns.keys():
     m.params.FeasibilityTol= 1e-6     # min: 1e-9, max: 1e-2, default: 1e-6
     m.params.OptimalityTol= 1e-6      # min: 1e-9, max: 1e-2, default: 1e-6
     m.params.Presolve= 2              # default: -1, max= 2
-
-    
     
     S_p= np.maximum(S, 0)
 
@@ -278,6 +278,16 @@ for target_con in con2rxns.keys():
         m.addConstr(v_pred == rxn_con2abundance[(rxn, target_con)] * rxn2kappmax[rxn] * eta)
         v_pred_all[rxn]= v_pred
 
+        # v[rxns.index(rxn)].ub = rxn_con2abundance[(rxn, target_con)] * rxn2kappmax[rxn]
+
+    for rxn in rxns:
+        if (rxn, target_con) in rxn_con2abundance and rxn in rxn2kappmax:
+            temp_E= rxn_con2abundance[(rxn, target_con)]
+            temp_kapp= rxn2kappmax[rxn]
+            new_ub= temp_E * temp_kapp
+            if new_ub > 0:
+                v[rxns.index(rxn)].ub = new_ub * 1.01
+            
 
     obj_expr= gp.quicksum((v[rxn_indices[rxn]]- v_pred_all[rxn]) * (v[rxn_indices[rxn]]- v_pred_all[rxn])\
                           for rxn in target_rxns_E_available)
@@ -286,10 +296,13 @@ for target_con in con2rxns.keys():
     m.setObjective(obj_expr, GRB.MINIMIZE)
 
     m.optimize()
+
+    print("STATUS:\t", m.status)
     
     
     # checking one solution
-    if m.status== GRB.OPTIMAL or m.status= GRB.TIME_LIMIT:
+    if m.sol_count > 0:
+        print("We have solution")
     
         rxn2flux= dict()
         for rxn_con, flux in rxn_con2fluxes_heckmann.items():
@@ -297,49 +310,24 @@ for target_con in con2rxns.keys():
                 rxn2flux[rxn_con[0]]= flux
 
         v_measured= []
+        etas= []
         for rxn in rxns:
             v_measured.append(rxn2flux[rxn])
+            if rxn in target_rxns_E_available:
+                etas.append(eta_all[rxn].x)
+            else:
+                etas.append(None)
         v_measured=np.array(v_measured)
 
-        correlation= np.corrcoef(np.log(v_measured+1e-5), np.log(v.x+1e-5))[0, 1]
-        con2corr[target_con]= correlation
-        print("Correlation:\t", correlation)
 
-        count_zero_v_pred= 0
-        zero_v_pred_indices= []
-        count_zero_v_measure= 0
-        fluxes= []
-        for i, (v_m, v_p) in enumerate(zip(v_measured, v.x)):
-            if v_p == 0 and v_m > 0:
-                count_zero_v_pred += 1
-                if v_m>0.01:
-                    zero_v_pred_indices.append(i)
-            if v_m == 0 and v_p > 0:
-                count_zero_v_measure += 1
-            fluxes.append([i, v_m, v_p])
-        print("#zero v_pred & positive v_measure:  ", count_zero_v_pred)
-        print("#zero v_measure & positive v_pred:  ", count_zero_v_measure)
-
-        with open(f'../data/heckmann/qp_results/fluxes_{target_con}.csv', 'w') as file:
+        with open(f'../data/heckmann/qp_results_con_split/result_{target_con}.csv', 'w') as file:
             writer= csv.writer(file, delimiter= ',')
-            writer.writerow(['index', 'v_measured', 'v_pred'])
-            for row in fluxes:
-                writer.writerow(row)
+            writer.writerow(['index', 'v_measured', 'v_pred', 'eta'])
+            for i, (v_m, v_p, eta) in enumerate(zip(v_measured, v.x, etas)):
+                writer.writerow([i, v_m, v_p, eta])
 
-        plt.figure(figsize=(5, 5))
-        plt.plot(np.log(v_measured + 1e-5), np.log(v.x+ 1e-5), 'o', markersize=1, color= 'blue')
-        plt.xlabel('v_measured')
-        plt.ylabel('v_pred')
-        plt.savefig(f'../data/heckmann/qp_results/fluxes_{target_con}.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-        print("_" * 100)
     else:
         print(m.status)
-        break
 
-with open('../data/heckmann/qp_results/correlations.csv', 'w') as file:
-    writer= csv.writer(file, delimiter= ',')
-    writer.writerow(['condition', 'corrcoef'])
-    for key, value in con2corr.items():
-        writer.writerow([key, value])
+    print("_" * 100)
+
